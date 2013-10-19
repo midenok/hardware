@@ -1,0 +1,4 @@
+#minute	hour	mday	month	wday	who	command
+0	22	*	*	*	root	/usr/local/bin/leds.sh off
+0	10	*	*	*	root	/usr/local/bin/leds.sh on
+55	3	*	*	1,4	root	/usr/syno/bin/synopkg chkupgradepkg
