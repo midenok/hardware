@@ -30,7 +30,7 @@ add name="freednsCheck" source={
     :global freednsRetryMax 100
 
 #   Log warning after this count of failures. 0 means 'never'
-    :global freednsRetryWarn
+    :global freednsRetryWarn 0
 
 
     /ip route
