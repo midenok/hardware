@@ -11,6 +11,7 @@
     :local blacklistTimeout 10d
     :local guardInterface ether1-gateway
     :local insertBefore 3
+    :local sshPort 22022
 
     /ip firewall filter
 
@@ -59,7 +60,7 @@
 
     add chain=ssh action=accept
 
-    add chain=input protocol=tcp dst-port=22 \
+    add chain=input protocol=tcp dst-port=$sshPort \
         action=jump \
         jump-target=ssh \
         in-interface=$guardInterface \

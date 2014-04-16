@@ -1,5 +1,6 @@
 # Source: http://wiki.mikrotik.com/wiki/Setting_static_DNS_record_for_each_DHCP_lease
 # Source: http://www.geektank.net/2012/07/mikrotik-automatically-creating-dns-record-for-each-dhcp-leaseclient/
+
 :local zone "dhcp"
 :local ttl "00:05:00"
 :local hostname
