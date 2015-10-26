@@ -108,7 +108,9 @@ add name="freednsUpdate" source={
                 /system scheduler remove [find name="freednsUpdate"]
                 :return 0
             } else={
-                :set resolvedIp [:resolve $freednsVerify]
+                :do {
+                    :set resolvedIp [:resolve $freednsVerify]
+                } on-error={ :nothing }
                 :log debug "freednsUpdate: resolved $freednsVerify to $resolvedIp"
             }
         }

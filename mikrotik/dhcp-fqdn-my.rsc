@@ -5,32 +5,41 @@
 # 2. Save modified file, upload via tftp, sftp, web, etc.
 # 3. Run /import dhcp-fqdn-my.rsc
 
-:global chopzero do={
-    :local string $1
-    :local end [:find $string "\00"]
-    :if ($end > 0) do={
-        :return [:pick $string 0 $end]
-    }
-    :return $string
-}
+/system script
+remove [find name="dhcp-startup"]
 
-:global dnssethost do={
-    :global chopzero
-    :local hostname [$chopzero $1]
-    :local ip $2
-    :local leasetime [/ip dhcp-server get [find name=default] lease-time]
-    :put $hostname
-    /ip dns static
-    :local items ([find address=$ip], [find name=$hostname address!=$ip])
-    :if ([:len $items] > 0) do={
-        set ($items->0) name=$hostname address=$ip ttl=$leasetime
-        :set items [:pick $items 1 99999999]
-        :if ([:len $items] > 0) do={
-            remove $items
+add name="dhcp-startup" source={
+    :global dnsLocalSuffix ".lan"
+
+    :global chopzero do={
+        :local string $1
+        :local end [:find $string "\00"]
+        :if ($end > 0) do={
+            :return [:pick $string 0 $end]
         }
-    } else={
-        add name=$hostname address=$ip ttl=$leasetime
+        :return $string
     }
+
+    :global dnssethost do={
+        :global chopzero
+        :global dnsLocalSuffix
+        :local hostname ([$chopzero $1]. $dnsLocalSuffix)
+        :local ip $2
+        :local leasetime [/ip dhcp-server get [find name=default] lease-time]
+        /ip dns static
+        :local items ([find address=$ip], [find name=$hostname address!=$ip])
+        :if ([:len $items] > 0) do={
+            set ($items->0) name=$hostname address=$ip ttl=$leasetime
+            :set items [:pick $items 1 99999999]
+            :if ([:len $items] > 0) do={
+                remove $items
+            }
+        } else={
+            add name=$hostname address=$ip ttl=$leasetime
+        }
+    }
+
+    /system script run dhcp-names-refresh
 }
 
 /system script
@@ -55,13 +64,19 @@ add name="dhcp-names-refresh" source={
         :local hostname [get $i host-name]
         :local ip [get $i address]
 
-        :if ($hostname != "") do={
+        :if ([:len $hostname] > 0) do={
             $dnssethost $hostname $ip
         }
     }
 }
-/system script run dhcp-names-refresh
+
 /ip dns static print
 
+/system scheduler
+    remove [find name="dhcp-startup"]
+    add name="dhcp-startup" start-time=startup interval=0 on-event="/system script run dhcp-startup"
+
+/system script run dhcp-startup
+
 /ip dhcp-server
-set [find name="default"] lease-script=dhcp-on-lease
+    set [find name="default"] lease-script=dhcp-on-lease
