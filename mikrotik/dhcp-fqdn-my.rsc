@@ -39,6 +39,13 @@ add name="dhcp-startup" source={
         }
     }
 
+    /interface wireless
+    :local ssid [get 0 ssid]
+    :local iface [get 0 name]
+    /ip address
+    :local localip [get [find interface=$iface] address]
+    :set localip [:pick $localip 0 [:find $localip "/"]]
+    $dnssethost $ssid $localip
     /system script run dhcp-names-refresh
 }
 
@@ -70,8 +77,6 @@ add name="dhcp-names-refresh" source={
     }
 }
 
-/ip dns static print
-
 /system scheduler
     remove [find name="dhcp-startup"]
     add name="dhcp-startup" start-time=startup interval=0 on-event="/system script run dhcp-startup"
@@ -80,3 +85,5 @@ add name="dhcp-names-refresh" source={
 
 /ip dhcp-server
     set [find name="default"] lease-script=dhcp-on-lease
+
+/ip dns static print
