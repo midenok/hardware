@@ -52,13 +52,18 @@ add name="dhcp-startup" source={
 /system script
 remove [find name="dhcp-on-lease"]
 add name="dhcp-on-lease" source={
-    :if ($leaseBound = 1) do={
-        /ip dhcp-server lease
-        :local hostname [get [find active-address=$leaseActIP] host-name]
-        $dnssethost $hostname $leaseActIP
-    } else={
-        /ip dns static
-        remove [find address=$leaseActIP]
+    :global dnssethost
+    :if ([:typeof $leaseBound] != "nothing") do={
+        :if ($leaseBound = 1) do={
+            /ip dhcp-server lease
+            :local hostname [get [find active-address=$leaseActIP] host-name]
+            :log info "DHCP $leaseServerName: adding $leaseActIP as $hostname"
+            $dnssethost $hostname $leaseActIP
+        } else={
+            /ip dns static
+            :log info "DHCP $leaseServerName: removing $leaseActIP"
+            remove [find address=$leaseActIP]
+        }
     }
 }
 
