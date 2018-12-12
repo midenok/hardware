@@ -32,11 +32,13 @@ add name="dhcp-startup" source={
             :local items ([find address=$ip], [find name=$hostname address!=$ip])
             :if ([:len $items] > 0) do={
                 set ($items->0) name=$hostname address=$ip ttl=$leasetime
+                :log debug "DNS updated: name=$hostname address=$ip ttl=$leasetime"
                 :set items [:pick $items 1 99999999]
                 :if ([:len $items] > 0) do={
                     remove $items
                 }
             } else={
+                :log debug "DNS added: name=$hostname address=$ip ttl=$leasetime"
                 add name=$hostname address=$ip ttl=$leasetime
             }
         }
@@ -46,9 +48,9 @@ add name="dhcp-startup" source={
     :local ssid [get 0 ssid]
     :local iface [get 0 name]
     /ip address
-    :local localip [get [find interface=$iface] address]
+    :local localip [get [:pick [find interface=$iface disabled=no] 0] address]
     :set localip [:pick $localip 0 [:find $localip "/"]]
-    $dnssethost $ssid $localip
+    $dnssethost [/system identity get name] $localip
     /system script run dhcp-names-refresh
 }
 
