@@ -23,19 +23,22 @@ add name="dhcp-startup" source={
     :global dnssethost do={
         :global chopzero
         :global dnsLocalSuffix
-        :local hostname ([$chopzero $1]. $dnsLocalSuffix)
-        :local ip $2
-        :local leasetime [/ip dhcp-server get [find name=default] lease-time]
-        /ip dns static
-        :local items ([find address=$ip], [find name=$hostname address!=$ip])
-        :if ([:len $items] > 0) do={
-            set ($items->0) name=$hostname address=$ip ttl=$leasetime
-            :set items [:pick $items 1 99999999]
+        :local hostname [$chopzero $1]
+        :if ([:len $hostname] > 0) do={
+            :set hostname ($hostname. $dnsLocalSuffix)
+            :local ip $2
+            :local leasetime [/ip dhcp-server get [find name=default] lease-time]
+            /ip dns static
+            :local items ([find address=$ip], [find name=$hostname address!=$ip])
             :if ([:len $items] > 0) do={
-                remove $items
+                set ($items->0) name=$hostname address=$ip ttl=$leasetime
+                :set items [:pick $items 1 99999999]
+                :if ([:len $items] > 0) do={
+                    remove $items
+                }
+            } else={
+                add name=$hostname address=$ip ttl=$leasetime
             }
-        } else={
-            add name=$hostname address=$ip ttl=$leasetime
         }
     }
 
