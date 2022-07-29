@@ -1,0 +1,21 @@
+#!/bin/bash
+set -x
+cat /etc.defaults/VERSION
+mount
+parted -s /dev/sda p unit s p
+parted -s /dev/sdb p unit s p
+parted -s /dev/md0 p unit s p
+for d in /dev/md*
+do
+    mdadm -D $d
+done
+for d in /dev/sda?*
+do
+    mdadm -E $d
+    mdadm -E ${d/sda/sdb}
+done
+mdadm --version
+uname --all
+pvdisplay --units s
+vgdisplay --units s
+lvdisplay --units s

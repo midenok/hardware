@@ -1,0 +1,12 @@
+#!/bin/bash
+source /etc.defaults/VERSION
+orig="orig_${productversion}-${buildnumber}"
+mkdir -p /$orig/usr/syno
+rsync -aP /etc /$orig/
+rsync -aP /etc.defaults /$orig/
+rsync -aP /usr/syno/etc /$orig/usr/syno/
+collect &> /$orig/info.txt
+info_txt=/tmp/info_${productversion}-${buildnumber}.txt
+cp /$orig/info.txt $info_txt
+orig_tar=/tmp/$orig.tgz
+tar czpf $orig_tar /$orig
