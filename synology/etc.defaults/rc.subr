@@ -1,0 +1,1432 @@
+# Copyright (c) 2000-2012 Synology Inc. All rights reserved.
+
+
+# According to LSB 3.1 (ISO/IEC 23360:2006), the `status` init-scripts
+# action should return the following exit status codes.
+#
+LSB_STAT_RUNNING=0      # program is running or service is OK
+LSB_STAT_DEAD_FPID=1    # program is dead and /var/run pid file exists
+LSB_STAT_DEAD_FLOCK=2   # program is dead and /var/lock lock file exists
+LSB_STAT_NOT_RUNNING=3  # program is not runnning
+LSB_STAT_UNKNOWN=4      # program or service status is unknown
+LSB_STAT_BROKEN=150	# program is broken
+LSB_STAT_MODULE_ERR=151 # kernel module is dead
+# 5-99                  # reserved for future LSB use
+# 100-149               # reserved for distribution use
+# 150-199               # reserved for application use
+# 200-254               # reserved
+
+# Non-status init-scripts actions should return an exit status of zero if
+# the action was successful. Otherwise, the exit status shall be non-zero.
+#
+LSB_SUCCESS=0           # successful
+LSB_ERR_GENERIC=1       # generic or unspecified error
+LSB_ERR_ARGS=2          # invalid or excess argument(s)
+LSB_ERR_UNIMPLEMENTED=3 # unimplemented feature (for example, `reload`)
+LSB_ERR_PERM=4          # user had insufficient privilege
+LSB_ERR_INSTALLED=5     # program is not installed
+LSB_ERR_CONFIGURED=6    # program is not configured
+LSB_NOT_RUNNING=7       # program is not running
+# 8-99                  # reserved for future LSB use
+# 100-149               # reserved for distribution use
+# 150-199               # reserved for application use
+# 200-254               # reserved
+
+SZF_MANUTIL_VOLUME_SIZE="/.manutil_volume_size"
+
+_MsgInit()
+{
+	local _col=80
+
+	if [ ! -t 1 ]; then
+		COLORIZED=""
+	elif [ -t 0 -a -x /bin/stty ]; then
+		# stty will fail when stdin isn't a terminal
+		_col=$(/bin/stty size | /usr/bin/cut -d' ' -f2)
+	fi
+
+	MSG_PRE="::"
+	if [ "$COLORIZED" = "yes" ]; then
+		STAT_POS="\e[$(($_col - 8))G"
+
+		C_WARN="\e[1;33m"
+		C_BUSY="\e[0;32m"
+		C_DONE="\e[1;32m"
+		C_FAIL="\e[1;31m"
+		C_MISC="\e[;1m"
+		C_CLEAR="\e[m"
+	fi
+}
+
+: ${COLORIZED:=}
+_MsgInit
+
+MsgWarn()
+{
+	[ -n "${1:-}" ] && echo -en "${C_MISC:-}${MSG_PRE:-} ${C_CLEAR:-}${1}"
+	echo -en "${STAT_POS:- ... }["
+	echo -en "${C_WARN:-}  !!  "
+	echo -e "${C_CLEAR:-}]"
+}
+
+MsgBusy()
+{
+	[ -n "${1:-}" ] && echo -en "${C_MISC:-}${MSG_PRE:-} ${C_CLEAR:-}${1}"
+	echo -en "${STAT_POS:- ... }["
+	echo -en "${C_BUSY:-} BUSY "
+	echo -en "${C_CLEAR:-}]"
+}
+
+MsgDone()
+{
+	[ -n "${1:-}" ] && echo -en "${C_MISC:-}${MSG_PRE:-} ${C_CLEAR:-}${1}"
+	echo -en "${STAT_POS:- ... }["
+	echo -en "${C_DONE:-}  OK  "
+	echo -e  "${C_CLEAR:-}]"
+}
+
+MsgFail()
+{
+	[ -n "${1:-}" ] && echo -en "${C_MISC:-}${MSG_PRE:-} ${C_CLEAR:-}${1}"
+	echo -en "${STAT_POS:- ... }["
+	echo -en "${C_FAIL:-}FAILED"
+	echo -e  "${C_CLEAR:-}]"
+}
+
+RCMsg()
+{
+	echo -n "$MSG_PRE $1"
+	shift; [ $# -eq 0 ] && { echo; return; }
+	[ "$COLORIZED" = "yes" ] && MsgBusy
+
+	$@ 1> /dev/null 2>> /var/log/messages
+	local ret=$?
+
+	[ $ret -eq 0 ] && MsgDone || MsgFail
+	return $ret
+}
+
+# Generate linux kernel version code
+# ex.
+#   KernelVersionCode "2.4.22"  => 132118
+#   KernelVersionCode "2.6"     => 132608
+#   KernelVersionCode "2.6.32"  => 132640
+#   KernelVersionCode "3"       => 196608
+#   KernelVersionCode "3.0.0"   => 196608
+KernelVersionCode()
+{
+	[ $# -eq 1 ] || return
+
+	local _version_string="$(echo "$1" | /usr/bin/cut -d'_' -f1)."
+	local _major_version=$(echo "${_version_string}" | /usr/bin/cut -d'.' -f1)
+	local _minor_version=$(echo "${_version_string}" | /usr/bin/cut -d'.' -f2)
+	local _revision=$(echo "${_version_string}" | /usr/bin/cut -d'.' -f3)
+
+	/bin/echo $((${_major_version:-0} * 65536 + ${_minor_version:-0} * 256 + ${_revision:-0}))
+}
+
+# Get current linux kernel version without extra version
+# format: VERSION.PATCHLEVEL.SUBLEVEL
+# ex. "2.6.32"
+KernelVersion()
+{
+	local _release=$(/bin/uname -r)
+	/bin/echo ${_release%%[-+]*} | /usr/bin/cut -d'.' -f1-3
+}
+
+PlatformGet()
+{
+	local _unique=$(/bin/get_key_value /etc.defaults/synoinfo.conf unique | cut -d"_" -f2)
+        /bin/echo ${_unique}
+}
+
+ModelGet()
+{
+	local _model=$(/bin/get_key_value /etc.defaults/synoinfo.conf unique | cut -d"_" -f3)
+        /bin/echo "${_model}"
+}
+
+SYNOCheckModule()
+{
+	if [ -n "$1" ]; then
+		/bin/grep -q "^\<${1//-/_}\>" /proc/modules
+	else
+		false
+	fi
+}
+
+# Load kernel modules in sequence, and also pass arguments if specified
+# in /etc/modules.conf as the following format:
+#     module_iscsi_trgt_args_rs18016xsp="pretty high priority"
+#     module_iscsi_trgt_args_2_6_32_x86_64="high priority"
+#     module_iscsi_trgt_args_2_6_32="lower priority"
+#     module_iscsi_trgt_args_bromolow="this platform priority"
+#     module_iscsi_trgt_args="general use"
+SYNOLoadModules()
+{
+	local _mod= _modpath= _args= _env=
+	local _kv=$(KernelVersion)
+	local _pf=$(PlatformGet)
+	local _mach=$(/bin/uname -m)
+	local _model=$(ModelGet)
+	local _suffix=".ko"
+
+	[ -f /etc.defaults/modules.conf ] && source /etc.defaults/modules.conf
+	[ -f /etc/modules.local.conf ] && source /etc/modules.local.conf # for customization
+
+	for _mod in "$@"; do
+		_modpath=/lib/modules/${_mod}${_suffix}
+
+		#use basename to grep the final module name of "_mod".
+		#	ex. if there is "/lib/modules/backports_dvb/xxx.ko", "xxx.ko" will be taken from "backports_dvb/xxx.ko".
+		local _basename_mod=`/usr/bin/basename $_mod`
+		SYNOCheckModule $_basename_mod && continue
+
+		if [ -f ${_modpath} ]; then
+			# try to find if there's any argument for this module
+			for _env in \
+				"_${_model//\+/p}" \
+				"_${_kv//./_}_${_mach}" \
+				"_${_kv//./_}" \
+				"_${_pf}" \
+				""
+			do
+				eval _args=\$module_${_basename_mod//-/_}_args${_env}
+				[ -n "$_args" ] && break;
+			done
+
+			RCMsg "Loading module $_mod" \
+			/sbin/insmod $_modpath $_args
+		fi
+	done
+}
+
+# Unload kernel modules in reverse sequence
+SYNOUnloadModules()
+{
+	local _mod= _list=
+
+	for _mod in "$@"; do
+		_list="$_mod $_list"
+	done
+
+	for _mod in $_list; do
+		#use basename to grep the final module name of "_mod".
+		#	ex. if there is "/lib/modules/backports_dvb/xxx.ko", "xxx.ko" will be taken from "backports_dvb/xxx.ko".
+	        local _basename_mod=`/usr/bin/basename $_mod`
+		SYNOCheckModule $_basename_mod || continue
+		RCMsg "Unloading module $_basename_mod" \
+		/sbin/rmmod $_basename_mod
+	done
+}
+
+# Remove the modules that have arg in /etc/modules.local.conf
+# For now , this is only used by USB drivers because they have been inserted in linuxrc.syno
+# And at that time , it can't see /etc/modules.local.conf
+SYNOCheckAndUnloadModules()
+{
+	for _mod in "$@"; do
+		if [ "" != "`awk -F"module_" '{print $2}' /etc/modules.local.conf | awk -F"_args" '{print $1}' | /bin/grep "^\<${_mod//-/_}\>"`" ]; then
+			SYNOUnloadModules "${_mod}"
+		fi
+	done
+}
+
+# Set error flag and exit
+# $1: ErrorStage
+# $2: ErrorNum
+# $3: ErrorFile
+IfErrorThenExit()
+{
+	local ret=${2:-1}
+
+	if [ $ret -gt 0 ]; then
+		echo "${1:-Unknown}:$ret" > ${3:-/tmp/installer.error}
+		exit $ret
+	fi
+}
+
+# Clean specified partition
+# $1: target
+# $2: disk
+CleanPartition()
+{
+	/sbin/sfdisk -N$1 -uS -q -f --no-reread -o0 -z0 -t0 -F -D $2
+}
+
+# Create partitions given partition number, size, and type
+# $1: partition number
+# $2: size in 512-byte sector
+# $3: partition type(id)
+# $4: skip size in 512-byte sector
+# $5: disk
+CreatePartition()
+{
+	/sbin/sfdisk -N$1 -uS -q -f --no-reread -j$4 -z$2 -t$3 -F $5
+}
+
+# print the size of a set
+# $1: a set of strings which split by space or newline
+# output: the set size
+UniqSize()
+{
+	echo "$1" | sed "s/\s\+/\n/g" | sort | uniq | wc -l
+}
+
+# By default (no arguments):
+#   If user set `swap_disks` option, use those disk's partition 2 as swap,
+#   otherwise, use all installed disk's partition 2 as swap.
+#   But, if no user-defined swap_disks are inserted, use all disk, too.
+#
+# $1: set this argument to use all internal disk as swap.
+# output: a set of partitions which will be assemble as swap raid.
+GenSwapParts()
+{
+	useAllDisk="$1"
+	swapIdx=`/bin/get_key_value /etc/synoinfo.conf swap_disks`
+	swapParts=""
+	SupportSAS=`/bin/get_key_value /etc.defaults/synoinfo.conf supportsas`
+	SupportPORTMAPV2=`/bin/get_key_value /etc.defaults/synoinfo.conf supportportmappingv2`
+	SupportDualhead=`/bin/get_key_value /etc.defaults/synoinfo.conf support_dual_head`
+	UniqueRD=`/bin/get_key_value /etc.defaults/synoinfo.conf unique | cut -d"_" -f2`
+	[ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ] && postfix="p2"
+	[ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ] || postfix="2"
+
+	[ -z "${useAllDisk}" -a -n "${swapIdx}" ] && for idx in ${swapIdx} ; do
+		partName="`/usr/syno/bin/synodiskfind 0 ${idx} --name`${postfix}"
+		if grep -q "\<${partName}\>" /proc/partitions; then
+			swapParts="${swapParts} ${partName}"
+		fi
+	done
+	if [ -n "${useAllDisk}" -o -z "${swapParts}" ]; then		# use all disks instead.
+		[ -z "${useAllDisk}" -a -n "${swapIdx}" -a -z "${swapParts}" ] && logger -s -t rc -p debug "User defined swaps not found"
+		logger -s -t rc -p debug "Use all internal disk as swap."
+		swapParts=""
+		tmpDisks=`/usr/syno/bin/synodiskport -installable_disk_list`
+		if [ -z "${tmpDisks}" ] ; then
+			logger -s -t rc -p err "No internal disk installed."
+			return 1
+		else
+			for diskName in ${tmpDisks} ; do
+				# No matter what kinds of model, NVMe use "p<N>" as its postfix.
+				if [ `echo $diskName | grep "nvme"` ]; then
+					partName="${diskName}p2"
+				else
+					partName="${diskName}${postfix}"
+				fi
+				grep -q "\<${partName}\>" /proc/partitions && swapParts="${swapParts} ${partName}"
+			done
+		fi
+	fi
+
+	echo ${swapParts}
+}
+
+# We add a new feature to move swap to limited internal disks.
+# Check if need to rebuild swap raid - md1
+#
+# input   : none
+# return 0: raid is healthy and identical with user-defined swap_disks.
+# return 1: swap_raid - md1 needs rebuild
+# return 2: no disk, critical error.
+# return 3: no disk swap
+CheckSwapRaid()
+{
+	NO_DISK_SWAP=`/bin/get_key_value /etc.defaults/synoinfo.conf no_disk_swap`
+	DYNAMIC_DISK_SWAP=`/bin/get_key_value /etc.defaults/synoinfo.conf dynamic_disk_swap`
+	if [ "yes" = "${NO_DISK_SWAP}" -o "yes" = "${DYNAMIC_DISK_SWAP}" ]; then
+		return 3
+	fi
+
+	grep -qe '^md1 : active' /proc/mdstat || return 1
+
+	md1Parts=`ls /sys/block/md1/md/dev-* -d | cut -d'-' -f2 | xargs`
+	swapParts=$(GenSwapParts)
+	[ -z "${swapParts}" ] && return 2
+
+	# check md1 partitions state
+	for part in ${md1Parts} ; do
+		partState=`cat /sys/block/md1/md/dev-${part}/state`
+		if ! echo $partState | grep -q 'in_sync' ; then
+			logger -s -t rc -p warn "$part in swap is not in sync ($partState)"
+			return 1
+		fi
+
+		pos=`/usr/syno/bin/synodiskpathparse ${part} | awk -F" " '{ print $2 }'`
+		# failed to parse disk topology !! there must be something wrong
+		if [ -z "${pos}" ]; then
+			logger -s -t rc -p notice "Failed to parse partition ${part}"
+			return 2
+		fi
+	done
+
+	# check 2 sets are identical
+	swapPartsSize=$(UniqSize "${swapParts}")
+	md1PartsSize=$(UniqSize "${md1Parts}")
+	unionPartsSize=$(UniqSize "${swapParts} ${md1Parts}")
+	[ ${unionPartsSize} -ne ${swapPartsSize} -o ${unionPartsSize} -ne ${md1PartsSize} ] \
+		&& logger -s -t rc -p warn "defined swap disk is not identical" \
+		&& logger -s -t rc -p warn "    defined disks: ${swapParts}" \
+		&& logger -s -t rc -p warn "     online disks: ${md1Parts}" \
+		&& return 1
+
+	return 0
+}
+
+
+# $1: disk/partition 's path or name (eg. sda, /dev/sda, sas5p2, /dev/sas3
+# output: the disk's or the partition belongs disk 's layout index.
+FindLayoutIndex()
+{
+	SupportSAS=`/bin/get_key_value /etc.defaults/synoinfo.conf supportsas`
+	SupportPORTMAPV2=`/bin/get_key_value /etc.defaults/synoinfo.conf supportportmappingv2`
+	disk=$1
+	[ -z "${disk}" ] && return 1
+
+	disk=`echo ${disk} | sed 's/^\/dev\///g'`
+	grep -q "\<${disk}\>" /proc/partitions || return 1
+
+	[ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ] && disk=`echo ${disk} | sed 's/p[0-9]\+$//g'`
+	[ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ] || disk=`echo ${disk} | sed 's/[0-9]\+$//g'`
+	grep -q "\<${disk}\>" /proc/partitions || return 1
+
+	# synopartition --check /dev/sda
+	# /dev/sda: dont contain partition [3]
+	# /dev/sda: partition layout is version 7, list index is 10.
+	index=`/usr/syno/sbin/synopartition --check /dev/${disk} | grep 'version.*index' | awk '{print $10}' | cut -d. -f1`
+	[ -z "${index}" ] && return 1
+
+	echo ${index}
+	return 0
+}
+
+# Check sysIdx and partIdx is match or not.
+# Use by MkSwapRaid()
+#
+# $1: system partition layout index
+# $2: this disk's partition layout index
+# return 0: Match
+# return 1: Not match
+CheckPartIdxMatch()
+{
+	local systemIdx=$1
+	local partitionIdx=$2
+	if [ ${systemIdx} -eq "11" ]; then
+		[ ${systemIdx} -ne ${partitionIdx} ] && [ "12" -ne ${partitionIdx} ] && return 1
+	elif [ ${systemIdx} -eq "12" ]; then
+		[ ${systemIdx} -ne ${partitionIdx} ] && [ "11" -ne ${partitionIdx} ] && return 1
+	else
+		[ ${systemIdx} -ne ${partitionIdx} ] && return 1
+	fi
+
+	return 0
+}
+
+# DSM #88768: some disks are dead suddenly during the swap create time
+# Now, we try to use available disks to create swap.
+# $1: raid type to create, "0" for raid0, "1" for raid1
+# $2: disk count
+# $3: disks to check
+# return 0: normal exit
+# return 1: error
+MkSwapRaidRetry()
+{
+	useRaidType=${1}
+	diskCnt=${2}
+	diskToCheck=${3}
+	diskToUse=""
+
+	logger -s -t rc -p err "Failed to create swap space with ${diskToCheck}, retry by using available disks."
+
+	for disk in ${diskToCheck}; do
+		disk_name=`echo ${disk} | cut -d "/" -f 3`
+		if [ `cat /proc/partitions | grep -c ${disk_name}` -eq 0 ]; then # "missing" or non-exist device
+			diskToUse="${diskToUse} missing"
+		else
+			mdadm -E -b ${disk}
+			if [ $? -ne 0 ]; then
+				diskToUse="${diskToUse} missing"
+			else
+				diskToUse="${diskToUse} ${disk}"
+			fi
+		fi
+	done
+
+	logger -s -t rc -p debug "Retry by using disks: ${diskToUse}"
+	mdadm -C /dev/md1 -e 0.9 -amd -R -l"$useRaidType" -n ${diskCnt} ${diskToUse}
+	return $?
+}
+
+MkLoopDevForPerformanceTest()
+{
+	DYNAMIC_DISK_SWAP=`/bin/get_key_value /etc.defaults/synoinfo.conf dynamic_disk_swap`
+
+	backingFile="/var/.swap_dev_placeholder"
+	backingSize=2
+	if [ "yes" != "${DYNAMIC_DISK_SWAP}" ]; then
+		backingFile="/tmp/.performance_test"
+		backingSize=1
+	fi
+
+	/bin/dd if=/dev/zero of="${backingFile}" bs=1M count=${backingSize}
+	SYNOLoadModules "loop"
+	spareLoopDev=`/sbin/losetup -f`
+	/sbin/losetup "${spareLoopDev}" "${backingFile}"
+	eval "$1=${spareLoopDev}"
+}
+
+# Make md using user-defined `swap_disks`, or all disks if `swap_disks` not specified
+#
+# $1: raid type you want, "0" for raid0, and "1" for raid 1
+# $2: set this argument using all internal disk as swap.
+# return 0: normal exit.
+# return 1: mdadm create failed.
+# return 2: critical error, no disk can be assembled.
+MkSwapRaid()
+{
+	UniqueRD=`/bin/get_key_value /etc.defaults/synoinfo.conf unique | cut -d"_" -f2`
+	SupportDualhead=`/bin/get_key_value /etc.defaults/synoinfo.conf support_dual_head`
+	SupportSysAdjust=`/bin/get_key_value /etc.defaults/synoinfo.conf support_sys_adjust`
+	SupportSAS=`/bin/get_key_value /etc.defaults/synoinfo.conf supportsas`
+	SupportPORTMAPV2=`/bin/get_key_value /etc.defaults/synoinfo.conf supportportmappingv2`
+	NO_DISK_SWAP=`/bin/get_key_value /etc.defaults/synoinfo.conf no_disk_swap`
+	DYNAMIC_DISK_SWAP=`/bin/get_key_value /etc.defaults/synoinfo.conf dynamic_disk_swap`
+	useRaidType="${1:-1}"
+	useAllDisk="$2"
+
+	if [ "${SupportDualhead}" = "yes" ] || [ "${SupportSysAdjust}" = "yes" ]; then
+		MaxDisks=`/bin/get_key_value /etc.defaults/synoinfo.conf max_sys_raid_disks`
+	else
+		MaxDisks=`/bin/get_key_value /etc.defaults/synoinfo.conf maxdisks`
+	fi
+
+	if [ "yes" = "${NO_DISK_SWAP}" -o "yes" = "${DYNAMIC_DISK_SWAP}" ]; then
+		MkLoopDevForPerformanceTest spareLoopDev
+		md1PartsPath="${spareLoopDev}"
+		diskCnt=1
+		MaxDisks=1
+	else
+		swapParts=$(GenSwapParts "${useAllDisk}")
+		[ -z "${swapParts}" ] && return 2
+
+		diskCnt=0
+		md1PartsPath=""
+		sysIdx=$(FindLayoutIndex `/bin/ls -1 /sys/block/md0/slaves | head -n1`)
+		for part in $swapParts ; do
+			path="/dev/${part}"
+			[ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ] && postfix="p2"
+			[ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ] || postfix="2"
+			# No matter what kinds of model, NVMe use "p<N>" as its postfix.
+			if [ `echo $path | grep "nvme"` ]; then
+				postfix="p2"
+			fi
+
+			[ -b ${path} ] || continue
+
+			[ "${SupportSysAdjust}" = "yes" ] && [ ! -e /sys/block/md0/slaves/`echo ${part} | sed "s/2$/1/g"` ] && continue
+
+			diskPath=`echo "${path}" | sed "s/${postfix}//g"`
+			diskAllowJoin=`/usr/syno/sbin/synostgsysraid --get-conf ${diskPath}`
+			[ "${diskAllowJoin}" = "not join" ] && continue
+
+			umount -R ${path} &> /dev/null
+			dd if=${path} count=1 &> /dev/null || continue
+			mkfs.ext4 -n ${path} &> /dev/null || continue
+
+			partIdx=$(FindLayoutIndex ${part})
+			[ -z "${partIdx}" ] && continue
+
+			CheckPartIdxMatch ${sysIdx} ${partIdx}
+			if [ $? != 0 ]; then
+				continue
+			fi
+
+			md1PartsPath="${md1PartsPath} ${path}"
+			diskCnt=$(( ${diskCnt} + 1 ))
+		done
+	fi
+
+	if [ ${diskCnt} -gt 0 ]; then
+		[ ${diskCnt} -gt ${MaxDisks} ] && [ "${SupportSysAdjust}" != "yes"  ] \
+			&& logger -s -t rc -p err "Error: Swap candidates(${diskCnt}) is greater than max disks(${MaxDisks})" \
+			&& logger -s -t rc -p err "Error: Swap candidates: $md1PartsPath" \
+			&& return 1
+		if [ "$useRaidType" == "0" ]; then
+			mdadm -C /dev/md1 -e 0.9 -amd -R -l"$useRaidType" -n ${diskCnt} ${md1PartsPath}
+			if [ $? -ne 0 ]; then
+				MkSwapRaidRetry "${useRaidType}" "${diskCnt}" "${md1PartsPath}"
+				return $?
+			else
+				return 0
+			fi
+		elif [ "$useRaidType" == "1" ]; then
+			missCnt=$(( ${MaxDisks} - ${diskCnt} ))
+			md1PartsPath="${md1PartsPath} `yes missing | head -n ${missCnt} | xargs`"
+			mdadm -C /dev/md1 -e 0.9 -amd -f -R -l"$useRaidType" -n ${MaxDisks} ${md1PartsPath}
+			if [ $? -ne 0 ]; then
+				MkSwapRaidRetry "${useRaidType}" "${MaxDisks}" "${md1PartsPath}"
+				return $?
+			else
+				return 0
+			fi
+		else
+			logger -s -t rc -p err "Error: cannot create raid type raid$useRaidType"
+			return 1
+		fi
+	else
+		if [ -z "${useAllDisk}" ]; then
+			logger -s -t rc -p err "No assigned swap disk (${swapParts}) can be assembled, use all instead."
+			MkSwapRaid 1 "alldisk"
+			return $?
+		else
+			logger -s -t rc -p err "No disk (${swapParts}) can be assembled."
+			return 2
+		fi
+	fi
+}
+
+ExpandRaidSwap() {
+	swapoff /dev/md1
+	mdadm -S /dev/md1
+	SupportSAS=`/bin/get_key_value /etc.defaults/synoinfo.conf supportsas`
+	SupportPORTMAPV2=`/bin/get_key_value /etc.defaults/synoinfo.conf supportportmappingv2`
+	SupportDualhead=`/bin/get_key_value /etc.defaults/synoinfo.conf support_dual_head`
+	UniqueRD=`/bin/get_key_value /etc.defaults/synoinfo.conf unique | cut -d"_" -f2`
+	diskIdList=`/usr/syno/bin/synodiskport -installable_disk_list`
+
+	for DiskIdx in ${diskIdList} ; do
+		dd if=/dev/${DiskIdx} of=/dev/null count=1 > /dev/null 2>&1
+		if [ $? = "0" ]; then
+			if [ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ]; then
+				mkswap /dev/${DiskIdx}p2
+				swapon /dev/${DiskIdx}p2
+			else
+				mkswap /dev/${DiskIdx}2
+				swapon /dev/${DiskIdx}2
+			fi
+		fi
+	done
+}
+
+CreateScratch() {
+	swapoff /dev/md1
+	if [ $? != 0 ]; then
+		logger -s -t rc -p err "Error: failed to swapoff md1"
+		return 1
+	fi
+
+	mdadm -S /dev/md1
+	if [ $? != 0 ]; then
+		logger -s -t rc -p err "Error: failed to stop md1"
+		return 1
+	fi
+
+	MkSwapRaid 0
+	if [ $? != 0 ]; then
+		logger -s -t rc -p err "Error: failed to create raid0 on /dev/md1"
+		return 1
+	fi
+
+	mkfs.ext4 -F /dev/md1
+	if [ $? != 0 ]; then
+		logger -s -t rc -p err "Error: failed to mkfs.ext4 on /dev/md1"
+		return 1
+	fi
+
+	mkdir /scratch
+	mount /dev/md1 /scratch
+	if [ $? != 0 ]; then
+		logger -s -t rc -p err "Error: failed to mount /dev/md1 on /scratch"
+		return 1
+	fi
+
+	mkdir -p /sbin/etc
+	echo "[scratch_files]" > /sbin/etc/e2fsck.conf
+	echo "directory = /scratch" >> /sbin/etc/e2fsck.conf
+	return 0
+}
+
+RaidSwapBack() {
+	SupportSAS=`/bin/get_key_value /etc.defaults/synoinfo.conf supportsas`
+	SupportPORTMAPV2=`/bin/get_key_value /etc.defaults/synoinfo.conf supportportmappingv2`
+	SupportDualhead=`/bin/get_key_value /etc.defaults/synoinfo.conf support_dual_head`
+	UniqueRD=`/bin/get_key_value /etc.defaults/synoinfo.conf unique | cut -d"_" -f2`
+	diskIdList=`/usr/syno/bin/synodiskport -installable_disk_list`
+
+	if [ $? = "0" ]; then
+		for DiskIdx in ${diskIdList} ; do
+			if [ "$SupportSAS" = "yes" -o "$SupportPORTMAPV2" = "yes" ]; then
+				swapoff /dev/${DiskIdx}p2
+			else
+				swapoff /dev/${DiskIdx}2
+			fi
+		done
+	fi
+	MkSwapRaid 1
+	mkswap /dev/md1
+	swapon /dev/md1
+}
+
+RemoveScratch()
+{
+	rm -f /sbin/etc/e2fsck.conf
+	rmdir /sbin/etc
+	umount /scratch
+	rm -r /scratch
+	mdadm -S /dev/md1
+	RaidSwapBack
+}
+
+NeedVolumeScan()
+{
+	if [ ! -r /.vscan_confirmed ]; then
+		return 1
+	fi
+
+	if [ -f /var/.UpgradeBootup ]; then
+		echo "DSM is upgrading, skip volume scan once"
+		return 1
+	fi
+
+	if /usr/syno/sbin/synohacore --is_ha_running; then
+		if [ -f /var/lib/ha/ha.upg ]; then
+			echo "HA pkg is upgrading, skip volume scan once"
+			return 1
+		fi
+		if /var/packages/HighAvailability/target/sbin/synoha --check-ha-is-binding; then
+			echo "HA is binding, skip volume scan once"
+			return 1
+		fi
+	fi
+
+	return 0
+}
+
+VolumeScan()
+{
+	local UseScratch="n"
+	if [ "alpine" == `/bin/get_key_value /etc.defaults/synoinfo.conf unique | cut -d"_" -f2` ]; then
+		UseScratch="y"
+	fi
+
+	if NeedVolumeScan; then
+		echo "volume scan begin"
+		mkdir -p /var/log/fsck
+		if [ "y" == $UseScratch ]; then
+			logger -s -t rc -p notice "Create scratch..."
+			CreateScratch
+		else
+			logger -s -t rc -p notice "Expand swap..."
+			ExpandRaidSwap
+		fi
+		/bin/rm -rf /.e2fs_volume > /dev/null
+		for RemapFile in `ls /.remap.*`
+		do
+			DevName="/dev/"`echo "$RemapFile" | cut -d '.' -f 3-4 | sed 's/\./\//g'`
+			ThisDevUUID=`synofstool --get-fs-uuid ${DevName}`
+			RemapDevUUID=`synogetkeyvalue ${RemapFile} UUID`
+			if [ $ThisDevUUID == $RemapDevUUID ]; then
+				echo "$RemapFile" | cut -d '.' -f 3-4  >> /.e2fs_volume
+			else
+				/bin/rm $RemapFile
+			fi
+		done
+		RemapList=`/bin/cat /.e2fs_volume`
+		for ThisRemap in $RemapList;
+		do
+			ThisDev="/dev/"`echo $ThisRemap|sed 's/\./\//g'`
+			RemapFile="/.remap."$ThisRemap
+			echo "scan $ThisDev ..."
+			/sbin/e2fsck -C-1 -pvf $ThisDev > "/var/log/fsck/"$ThisRemap".log" 2>&1
+			if [ -f "/var/log/fsck/"$ThisRemap".log.gz" ]; then
+				/bin/rm "/var/log/fsck/"$ThisRemap".log.gz"
+			fi
+			gzip "/var/log/fsck/"$ThisRemap".log"
+			/sbin/debugfs -q $RemapFile $ThisDev
+			/bin/rm $RemapFile
+			/bin/mv $RemapFile".files" "/.badfiles."$ThisRemap
+		done
+		/bin/rm /.vscan_confirmed
+		/bin/mv /.e2fs_volume /.scemd.show.badfiles
+		if [ "y" == $UseScratch ]; then
+			RemoveScratch
+		else
+			RaidSwapBack
+		fi
+		echo "volume scan finished"
+	fi
+}
+
+loop_node_gen()
+{
+	local _i=
+
+	for _i in $(/usr/bin/seq 0 255); do
+		[ -b /dev/loop$_i ] || mknod -m 0644 /dev/loop$_i b 7 $_i
+	done
+}
+
+is_pid_alive() { # <pid> [proc name]
+	local pid=${1:?"error params"}
+	local procname="$2"
+
+	if [ ! -r "/proc" -o ! -r "/proc/$pid" -o -z ${procname:-} ]; then
+		kill -0 "$pid" &>/dev/null
+	else
+		[ -n "$(readlink "/proc/$pid/exe")" ] && [ "$(basename `readlink "/proc/$pid/exe"`)" = "$procname" ]
+	fi
+}
+
+# lsb util functions
+lsb_status() { # <proc name> [pid file]
+	local procname=${1:?"error params"}
+	local pidfile=${2:-"/var/run/$procname.pid"}
+
+	if [ -f "$pidfile" ]; then
+		local pid=`cat "$pidfile"`
+		if is_pid_alive "$pid" "$procname"; then
+			return $LSB_STAT_RUNNING
+		else
+			return $LSB_STAT_DEAD_FPID
+		fi
+	fi
+
+	return $LSB_STAT_NOT_RUNNING
+}
+
+detect_manufactory_device()
+{
+	local ID_SYNO="f401"
+	local ID_FDT="f402"
+
+	if [ "1621xs+" = "$UniqueModel" ]; then
+		local vid;
+		local pid;
+		local usb_list=`ls /sys/bus/usb/devices/`;
+
+		for dev in $usb_list; do
+			if [ ! -f /sys/bus/usb/devices/${dev}/device/idVendor ] || [ ! -f /sys/bus/usb/devices/${dev}/device/idProduct ]; then
+				continue;
+			fi
+			vid=`cat /sys/bus/usb/devices/${dev}/device/idVendor`;
+			pid=`cat /sys/bus/usb/devices/${dev}/device/idProduct`;
+
+			if [ $vid = $ID_SYNO -o $vid = $ID_FDT ]; then
+				if [ $pid = $vid ]; then
+					true;
+					return $?;
+				fi
+			fi
+		done
+	elif [ $KERNEL_VCODE -ge $(KernelVersionCode "3.6") ]; then
+		local path="/sys/kernel/debug/usb/devices"
+		local ret_ID_SYNO=`cat $path|grep "Vendor=${ID_SYNO} ProdID=${ID_SYNO}"`;
+		local ret_ID_FDT=`cat $path|grep "Vendor=${ID_FDT} ProdID=${ID_FDT}"`;
+
+		if [ "x" != "x$ret_ID_SYNO" -o "x" != "x$ret_ID_FDT" ]; then
+			true;
+			return $?;
+		fi
+	else
+
+		local vid;
+		local pid;
+		local usb_list=`ls /sys/class/usb_device/`;
+
+		for dev in $usb_list; do
+			vid=`cat /sys/class/usb_device/${dev}/device/idVendor`;
+			pid=`cat /sys/class/usb_device/${dev}/device/idProduct`;
+
+			if [ $vid = $ID_SYNO -o $vid = $ID_FDT ]; then
+				if [ $pid = $vid ]; then
+					true;
+					return $?;
+				fi
+			fi
+		done
+	fi
+
+	if [ "x" != "x$(cat /proc/sys/kernel/syno_hw_version | grep VS960HD-)" ]; then
+		if [ "x1" = "x$(cat /proc/manufacturing_gpio)" ]; then
+			true;
+			return $?;
+		fi
+	fi
+
+	false;
+	return $?;
+}
+
+support_buildin_storage()
+{
+	local value=`get_key_value $SYNOINFO_DEF support_buildin_storage`
+	[ "xyes" = "x$value" ]
+	return $?
+}
+
+should_burnin_test()
+{
+	# don't do burnin if request memtest (for US3)
+	if [ -f /.memtest ]; then
+		false;
+		return $?;
+	fi
+
+	if [ -f /.nodisk ]; then
+		true;
+		return $?;
+	fi
+
+	# built-in storage model with f401/FDT device connected can run burnin-test
+	if support_buildin_storage && detect_manufactory_device; then
+		true
+		return $?
+	fi
+
+	false;
+	return $?;
+}
+
+dual_head_adjust_msg_queue()
+{
+	echo 32768 > /proc/sys/kernel/msgmax
+	echo 4096 > /proc/sys/kernel/msgmni
+	echo 10485760 > /proc/sys/kernel/msgmnb
+}
+
+get_mkfs_option()
+{
+	if [ "$1" = "ext4" ]; then
+		echo "-F -P"
+	elif [ "$1" = "btrfs" ]; then
+		echo "-f"
+	fi
+}
+
+SYNOInitWireless()
+{
+	local JUNIOR="${1}"
+	local SupportPCIWifi=`/bin/get_key_value /etc.defaults/synoinfo.conf support_pci_wifi`
+	local WIRELESS_CONF="/usr/syno/etc/pci-wireless.info"
+
+	if [ "yes" != "${SupportPCIWifi}" ]; then
+		return
+	fi
+
+	SYNOLoadWirelessDriver "${JUNIOR}"
+
+	# only required in non-junior mode
+	if [ -z "${JUNIOR}" -a -f ${WIRELESS_CONF} ]; then
+		cp "${WIRELESS_CONF}" /tmp/wireless.info
+	fi
+}
+
+SYNOInitEth()
+{
+	local SupportBDE10G=`/bin/get_key_value /etc.defaults/synoinfo.conf support_bde_internal_10g`
+
+	# check Broadwell LAN status, must before synonetseqadj
+	if [ "yes" = "$SupportBDE10G" ]; then
+	       /usr/syno/bin/synolanstatus
+	fi
+	# adjust NIC sequence
+	/usr/syno/bin/synonetseqadj
+}
+
+SYNOBootupConfGen()
+{
+	echo `date`": start cgen"
+
+	for CFGEN in /usr/syno/cfgen/*;
+	do
+		## s00_synocheckfstab need run after spacetool
+		if [ "$CFGEN" == "/usr/syno/cfgen/s00_synocheckfstab" ]; then
+			continue;
+		fi
+		if [ -x "$CFGEN" ] && [ ! -d "$CFGEN" ]; then
+			$CFGEN
+		fi
+	done
+}
+
+
+CheckLocale()
+{
+	LOCALE_CHECKER="/usr/syno/locale/locale_checker.sh"
+	if [ ! -x "$LOCALE_CHECKER" ]; then
+		chmod 755 $LOCALE_CHECKER
+	fi
+	$LOCALE_CHECKER
+}
+
+GetRecoverySPK()
+{
+	SupportXA="`/bin/get_key_value /etc.defaults/synoinfo.conf support_xa`"
+	HA_SPK_FILE=""
+	if [ "yes" == "$SupportXA" ] && [ -f /var/.ha.reinstallpkg ]; then
+		MNT_PATH="/tmp/.ha.recovery.mnt"
+		/bin/mkdir "$MNT_PATH"
+		backup_dev="`/usr/syno/bin/synodiskport -sys`"
+		for dev in $backup_dev; do
+			/bin/mount /dev/"$dev"p2 "$MNT_PATH"
+			HA_SPK_FILE=$(find "$MNT_PATH" -type f | grep HighAvailability)
+			if [ "" != "$HA_SPK_FILE" ]; then
+				break
+			fi
+		done
+	fi
+
+	echo "$HA_SPK_FILE"
+}
+
+CleanRecoverySPK()
+{
+	SupportXA="`/bin/get_key_value /etc.defaults/synoinfo.conf support_xa`"
+	if [ "yes" == "$SupportXA" ] && [ -f /var/.ha.reinstallpkg ]; then
+		MNT_PATH="/tmp/.ha.recovery.mnt"
+		/bin/umount "$MNT_PATH"
+		/bin/rmdir "$MNT_PATH"
+		/bin/rm /var/.ha.reinstallpkg
+	fi
+}
+
+CorrectServiceConf()
+{
+	# the order should be migrate => correct runkey => clean custom => HA => correct override => runlevel 1
+	/usr/syno/sbin/synopkgctl correct-cfg --config-only
+	/usr/syno/sbin/synoservice --correct-runkey
+	/usr/syno/sbin/synoservice --clean-custom
+	SupportXA="`/bin/get_key_value /etc.defaults/synoinfo.conf support_xa`"
+	if [ "yes" == "$SupportXA" ] || [ "yes" == "$RUN_HA" ]; then
+		RUN_LEVEL_2_SERVICES="crond synorelayd synovpnclient"
+		/usr/syno/sbin/synoservice --pause-all-no-action ha-passive ha-on-passive
+		# passive should run hotplugd, but pause here till the role is decided(in rc.ha)
+		/usr/syno/sbin/synoservice --pause-by-reason hotplugd ha-passive
+		# ha not support services
+		# Don't forget SxxPre.sh
+		/usr/syno/sbin/synoservice --pause-by-reason synowifid ha-not-support
+		/usr/syno/sbin/synoservice --pause-by-reason bluetoothd ha-not-support
+		/usr/syno/sbin/synoservice --pause-by-reason btacd ha-not-support
+		for serv in $RUN_LEVEL_2_SERVICES; do
+			/usr/syno/sbin/synoservice --pause-by-reason $serv ha-passive-level-2
+		done
+	fi
+	if [ -f /var/.UpgradeBootup ] || [ -f /var/.ha.reinstallpkg ]; then
+		if [ "yes" == "$SupportXA" ] || [ "yes" == "$RUN_HA" ] || /usr/syno/bin/synopkg list | grep -q HighAvailability-; then
+			HA_SPK_FILE=$(find /.SynoUpgradePackages/ -type f | grep HighAvailability-)
+			if [ "" == "$HA_SPK_FILE" ] && [ -f /var/.ha.reinstallpkg ]; then
+				HA_SPK_FILE=$(GetRecoverySPK)
+			fi
+			if [ "" != "$HA_SPK_FILE" ]; then
+				/usr/syno/bin/synopkg install "$HA_SPK_FILE"
+				/usr/syno/bin/synopkg start "HighAvailability"
+				/bin/sync
+				CleanRecoverySPK
+			fi
+		fi
+	fi
+	DR_BINARY_TOOL="/var/packages/DisasterRecovery/target/sbin/synosystemdr"
+	if [ "yes" == "$RUN_SYSTEMDR" ] && [ -s "$DR_BINARY_TOOL" ]; then
+		IS_VIRTUAL_DSM="`$DR_BINARY_TOOL --is_virtual_dsm`"
+		IS_CDSM="`$DR_BINARY_TOOL --is_cdsm`"
+		LOCAL_ROLE="`$DR_BINARY_TOOL --get_local_role`"
+		if [ "yes" == "`$DR_BINARY_TOOL --skip_run_services`" ]; then
+			# dr site
+			if [ "yes" == "$IS_VIRTUAL_DSM" ]; then
+				/usr/syno/sbin/synoservice --pause-all-no-action -p systemdr-on-cdsm-dr-site systemdr-on-cdsm-dr-site
+			else
+				/usr/syno/sbin/synoservice --pause-all-no-action -p systemdr-on-pdsm-dr-site systemdr-on-pdsm-dr-site
+			fi
+		elif [ "yes" == "$IS_CDSM" ]; then
+			/usr/syno/sbin/synoservice --pause-all-no-action -p systemdr-on-cdsm-main-site systemdr-on-cdsm-main-site
+		fi
+		if [ "main_site" == "$LOCAL_ROLE" ] || [ "test" == "$LOCAL_ROLE" ]; then
+			$DR_BINARY_TOOL --network_control pause
+		fi
+	fi
+	/usr/syno/sbin/synoservice --correct-override
+}
+
+SYNOBootupCheckConf()
+{
+	echo `date`": start correct config"
+
+	rm -rf /var/state/ups/*
+
+	# reset usbdev.conf before handle usb device hotplug
+	rm -f /usr/syno/etc/usbdev.conf
+
+	# reset network bridge setting, to prevent wifi plug-out when poweroff
+	/etc/rc.network reset-wireless-config >/dev/null 2>&1
+
+	# check if shutdown normally
+	if [ -f "/var/.NormalShutdown" ]; then
+		rm -f "/var/.NormalShutdown"
+	elif [ -f "/.NormalShutdown" ]; then
+		rm -f "/.NormalShutdown"
+	elif [ "yes" == "${SUPPORT_POWER_OFF}" ]; then
+		# to notice user in S99zbookok.sh
+		touch "/tmp/.ImproperShutdown"
+	fi
+
+	# Dump platform information to /.system_info/
+	/usr/syno/bin/synoplatform --dump-info
+
+	CheckLocale
+
+	CorrectServiceConf
+
+	# start mkcert before run level 1 in order to deploy service certificates
+	/sbin/initctl start mkcert
+	/sbin/initctl start tls-profile
+}
+
+SYNOBootupUpgTask()
+{
+	if [ ! -f /var/.UpgradeBootup ]; then
+		return;
+	fi
+
+	echo `date`": start bootup upgrade task"
+
+	/usr/bin/python -m compileall
+	/usr/bin/python -O -m compileall
+
+	# migrate service config
+	/usr/syno/sbin/synoservicemigrate --all
+}
+
+create_mmc_dev()
+{
+	echo "start create_mmc_dev"
+
+	# remove to-be faked device: sdaX / hdaX
+	/bin/rm -f /dev/sda
+	/bin/rm -f /dev/hda
+	for i in $(seq 15); do
+		/bin/rm -f /dev/sda${i};
+		/bin/rm -f /dev/hda${i};
+	done
+
+	# wait device probe done */
+	local _count=0;
+	while [ ! -e ${MMCBLK0} ]; do
+		# wait most 10 seconds
+		if [ $_count -ge 10 ]; then
+			echo "eMMC device failed.";
+			return 1;
+		fi
+
+		echo "wait 1 second for eMMC device ready..."
+		sleep 1;
+		_count=$((_count + 1))
+	done
+
+	# creat faked sdaX / hdaX, also mmcblk0
+	source ${MMCBLK0}/uevent;
+	/bin/mknod /dev/sda b ${MAJOR} ${MINOR}
+	/bin/mknod /dev/hda b ${MAJOR} ${MINOR}
+	/bin/mknod /dev/mmcblk0 b ${MAJOR} ${MINOR}
+	for i in $(seq 4); do
+		/bin/mknod /dev/sda${i} b ${MAJOR} $((MINOR + i))
+		/bin/mknod /dev/hda${i} b ${MAJOR} $((MINOR + i))
+		/bin/mknod /dev/mmcblk0p${i} b ${MAJOR} $((MINOR + i))
+	done
+}
+
+CreateFackedDevHda()
+{
+	/bin/mknod /dev/hda b 8 0
+	/bin/mknod /dev/hda1 b 8 1
+	/bin/mknod /dev/hda2 b 8 2
+	/bin/mknod /dev/hda3 b 8 3
+	/bin/mknod /dev/hda4 b 8 4
+}
+
+SYNOCreateDevNode()
+{
+	echo "start SYNOCreateDevNode"
+
+	local _support_mmc_boot=`get_key_value /etc.defaults/synoinfo.conf support_emmc_boot`
+	# For B#66473, after enable devtmpfs, /dev/hda* do not exist anymore.
+	# However, the old updater on 1-bay model will check if hda exist.
+	# This change cause 1-bay downgrade failed due to hda missing.
+	# For downgrade compatibility, we add facked hda back
+	# Exclude EDS14.
+	if [ "${_support_mmc_boot}" != "yes" ]; then
+		CreateFackedDevHda
+	fi
+}
+
+SYNOPrepareDevNode()
+{
+	echo "start SYNOPrepareDevNode"
+
+	# we may need to create device node for compatibility issue
+	# due to dev now handle by kernel (devtmpfs)
+	# those task shoud run on each bootup
+	SYNOCreateDevNode
+
+	if [ "$SupportSAS" = "yes" ]; then
+		. /etc.defaults/rc.sas
+		SASEnablePhy
+	# Only EDS14 and VS960HD can do "create_mmc_dev".
+	elif [ "${SUPPORT_MMC_BOOT}" == "yes" ]; then
+		create_mmc_dev
+	fi
+}
+
+UpgradeConfig()
+{
+	Event=$1
+
+	if [ ! -f "/var/.UpgradeBootup" ]; then
+		return;
+	fi
+
+	# Do not configupdate again for bootup-smallupdate reboot
+	if [ -f "/var/.AutoSmallupdateBootup" ]; then
+		echo "skip configupdate for bootup-smallupdate reboot"
+		return
+	fi
+
+	orgVer="/.old_patch_info/VERSION"
+	if [ -f "/.updater" ]; then
+		upgType="migrate"
+	else
+		upgType="upgrade"
+	fi
+
+	if [ -f $orgVer ]; then
+		/usr/syno/bin/configupdate -c $Event -t $upgType -p $orgVer
+
+		if [ -x "/usr/syno/bin/configupdate.small" ]; then
+			/usr/syno/bin/configupdate.small -c $Event -p $orgVer
+		fi
+	else
+		echo "Skip update config because not found ${orgVer}"
+	fi
+}
+
+SYNOTurnOnSwap()
+{
+	echo `date`": start turn on swap"
+
+	NO_DISK_SWAP=`/bin/get_key_value /etc.defaults/synoinfo.conf no_disk_swap`
+	DYNAMIC_DISK_SWAP=`/bin/get_key_value /etc.defaults/synoinfo.conf dynamic_disk_swap`
+	SupportPortMappingV2=`/bin/get_key_value /etc.defaults/synoinfo.conf supportportmappingv2`
+
+	if [ "yes" != "${UsbStation}" ]; then
+		if [ "$SUPPORT_RAID" != "yes" ]; then
+			if [ "${SupportPortMappingV2}" = "yes" ]; then
+				SwapDevice="/dev/sata1p2"
+			else
+				if [ "$PLATFORM" = "kvmcloud" ]; then
+					SwapDevice="/dev/sda6"
+				else
+					SwapDevice="/dev/sda2"
+				fi
+			fi
+		else
+			SwapDevice="/dev/md1"
+			#dualhead model will assemble /dev/md1 on linuxrc.syno.
+			if [ "yes" != "${SUPPORT_DUAL_HEAD}" ]; then
+				# For legacy compatible
+				grep -q md9999 /proc/mdstat && mdadm -S /dev/md9999
+
+				/usr/syno/bin/synocheckswapconfig
+				CheckSwapRaid
+				if [ $? -ne 0 ]; then
+					swapoff $SwapDevice
+					mdadm -S $SwapDevice
+					MkSwapRaid 1
+				fi
+			fi
+		fi
+
+		if [ "yes" != "${NO_DISK_SWAP}" -a "yes" != "${DYNAMIC_DISK_SWAP}" ]; then
+			mkswap $SwapDevice
+			swapon $SwapDevice
+		else
+			echo `date`": no disk swap is enabled"
+		fi
+
+		if [ $? -ne 0 -a -d /initrd ]; then
+			logger -s -t rc -p err "Failed to swapon ${SwapDevice}, reboot to network install mode."
+			touch "/.noroot"
+			reboot
+		fi
+
+		if test "$SUPPORT_ZRAM" = "yes" -a "$ENABLE_ZRAM" = "yes" ; then
+			/usr/syno/bin/synozram start
+		fi
+	fi
+}
+
+SYNOSourceConf()
+{
+	echo `date`": source config"
+
+	ConfList="/etc/sysconfig/network"
+	for ThisConfig in $ConfList;
+	do
+		if [ -r "$ThisConfig" ]; then
+			. $ThisConfig
+		fi
+	done
+}
+
+SYNOMountFS()
+{
+	echo `date`": start mount fs"
+
+	if [ $KERNEL_VCODE -ge $(KernelVersionCode "3.4") ]; then
+		# Need to enable the two kernel config, CONFIG_DEVTMPFS and CONFIG_DEBUG_FS, CONFIG_SYNO_ENABLE_USBFS_ENTRY
+		RCMsg "Mounting debugfs" \
+		mount --bind /dev/bus/usb /proc/bus/usb
+		mount -t debugfs none /sys/kernel/debug
+		ln -s /sys/kernel/debug/usb/devices /proc/bus/usb/devices
+	else
+		# usbfs need usbcore module
+		RCMsg "Mounting usbfs" \
+		mount -t usbfs /proc/bus/usb /proc/bus/usb
+	fi
+}
+
+SYNOStartVolume()
+{
+	echo `date`": start volume"
+	echo "volume_start="`awk '{print $1}' /proc/uptime` >> /run/synoservice/bootup_time_detail
+	SZF_HA_RC="/var/packages/HighAvailability/target/etc/rc.ha"
+
+	mkdir /tmp/space
+
+	#Start space
+	RUN_HA=`get_key_value $SYNOINFO runha`
+	if [ -x /usr/syno/bin/spacetool.shared ]; then
+		#adjust default sync speed to 1 KB/s as minimum, 2KB/s as maximum
+		/sbin/sysctl -w dev.raid.speed_limit_min=2
+		/sbin/sysctl -w dev.raid.speed_limit_max=1
+		SupportXA="`/bin/get_key_value /etc.defaults/synoinfo.conf support_xa`"
+		if [ "yes" != "$SupportXA" ]; then
+			/usr/syno/bin/spacetool.shared --bootup-assemble
+		fi
+		if [ "yes" != "$RUN_HA" ]; then
+			/usr/syno/bin/synovspace -all-load
+		fi
+		/usr/syno/cfgen/s00_synocheckfstab
+	fi
+
+	SYNOHA_BIN="/var/packages/HighAvailability/target/sbin/synoha"
+	if [ "yes" = "$RUN_HA" ]; then
+		# xa share the storage, only do configupdate for upgrade role active
+		if [ "yes" != "$SupportXA" ] || $SYNOHA_BIN --upg-is-active; then
+			$SZF_HA_RC load-for-upg
+			UpgradeConfig "volume_ready"
+			$SZF_HA_RC unload-for-upg
+		fi
+	else
+		# checking and Mounting filesystem(s) ...
+		/usr/syno/bin/synobootseq --set-check-fs  >/dev/null 2>&1
+		/etc.defaults/rc.volume start
+		# Create volume from network install [support_autocreate_shr] (need after reboot nano update)
+		if ! /usr/syno/sbin/synoupgrade --support-auto-smallupdate || [ -f "/var/.AutoSmallupdateBootup" ]; then
+			/usr/syno/sbin/bootup_create_volumes.sh
+		fi
+
+		# reset bootseq to start-services
+		/usr/syno/bin/synobootseq --set-start-services >/dev/null 2>&1
+		#Upgrade configuration files
+		UpgradeConfig "volume_ready"
+		/sbin/initctl emit --no-wait syno.volume.ready
+	fi
+	echo "volume_ready="`awk '{print $1}' /proc/uptime` >> /run/synoservice/bootup_time_detail
+}
+
+SYNOActionPreVolume()
+{
+	# increase threads-max for max 1024 btrfs volumes
+	local max_volumes=$(synogetkeyvalue /etc/synoinfo.conf max_volumes)
+	if [ "$max_volumes" != "" ] && [ 1024 -le $max_volumes ]; then
+		threads_max=$(/sbin/sysctl -n kernel.threads-max)
+		/sbin/sysctl -w kernel.threads-max=$((threads_max * 2))
+	fi
+}
+
+SYNOStartService()
+{
+	echo `date`": start service"
+	SZF_HA_RC="/var/packages/HighAvailability/target/etc/rc.ha"
+	RUN_HA=`get_key_value $SYNOINFO runha`
+
+	if [ "yes" = "$SUPPORT_HA" ] && [ "yes" = "$RUN_HA" ]; then
+		$SZF_HA_RC start
+	else
+		RCMsg "Starting services in background"
+		/sbin/start --no-wait dsm-services
+	fi
+}
+
+SYNOStartNetwork()
+{
+	SupportXA="`/bin/get_key_value /etc.defaults/synoinfo.conf support_xa`"
+	if [ "yes" == "$SupportXA" ]; then
+		(
+			. /var/packages/HighAvailability/target/etc/rc.subr
+			if [ ! -f "/var/.UpgradeBootup" ] && [ ! -f $HA_UPGRADE_INFO ]; then
+				set_net_conf_to_dhcp
+			fi
+		)
+	fi
+
+	echo `date`": start network"
+	echo "network_start="`awk '{print $1}' /proc/uptime` >> /run/synoservice/bootup_time_detail
+	/sbin/start network NETWORKING=${NETWORKING}
+
+	SZF_HA_RC="/var/packages/HighAvailability/target/etc/rc.ha"
+	if [ "yes" == "$SupportXA" ]; then
+		$SZF_HA_RC hb-start
+	fi
+	echo "network_finish="`awk '{print $1}' /proc/uptime` >> /run/synoservice/bootup_time_detail
+}
+
+SYNOStartRcLocal()
+{
+	## check if rc.local contain malware pattern
+	if [ -f /etc/rc.local ]; then
+		if grep -E "/var/run|synoman" /etc/rc.local; then
+			mv /etc/rc.local /etc/rc.local.bak
+			touch /.malware_detect_67278
+		fi
+	fi
+
+	## Notify user when rc.local contain detect
+	## malware pattern "/var/run" and "synoman"
+	## See B#67278 for more information
+	if [ -f /.malware_detect_67278 ]; then
+		/usr/syno/bin/synodsmnotify @administrators dsmnotify:system_event "Customized start-up script rc.local has been rename to rc.local.bak due to contain malware pattern. Please contact Synology support if you have any concern."
+		/usr/syno/bin/synologset1 sys warn 0x11100018
+		rm /.malware_detect_67278
+	fi
+
+	if [ -r /etc/rc.local ]; then
+		echo -n 'Starting local daemons:'
+		cat /etc/rc.local
+		sh /etc/rc.local
+	fi
+}
+
+# There some models have 2 synoinfo.conf when booting we should decide which to use
+# but if 8G setting downgrade to 2G will cause some problems. To avoid
+# 8G->2G, we forbid this config change.
+# Please refer /sds-sii/siicustimg.cpp SynoInfoPair stucture
+
+dual_synoinfo_handling()
+{
+	if [ -f /etc.defaults/synoinfo_8G.conf ]; then
+		if [ 8000000 -le "`awk '"MemTotal:"==$1{print $2}' /proc/meminfo`" ]; then
+			cp /etc.defaults/synoinfo_8G.conf /etc.defaults/synoinfo.conf
+		fi
+	fi
+}
+# vim:ft=sh
