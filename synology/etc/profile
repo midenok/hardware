@@ -6,7 +6,7 @@ PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/syno/sbin:/usr/syno/bin:/usr/local/sbin:
 export PATH
 
 if [ -r /etc/sysconfig/locale ]; then
-	. /etc/sysconfig/locale
+    . /etc/sysconfig/locale
 fi
 
 #This fixes the backspace when telnetting in.
@@ -29,3 +29,7 @@ alias ll="ls -la"
 
 ulimit -c 0
 PATH=/opt/bin:/opt/sbin:$PATH
+
+if [ -f /etc.defaults/.bashrc_profile ]; then
+    source /etc.defaults/.bashrc_profile
+fi
