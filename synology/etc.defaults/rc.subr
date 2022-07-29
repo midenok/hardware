@@ -1266,6 +1266,13 @@ SYNOTurnOnSwap()
 			/usr/syno/bin/synozram start
 		fi
 	fi
+
+	# Re-add pulled out drives back to system volume
+	for d in /dev/sd?1; do
+		if [ ! -e /sys/block/md0/slaves/${d#/dev/} ]; then
+			mdadm --add /dev/md0 $d
+		fi
+	done
 }
 
 SYNOSourceConf()
