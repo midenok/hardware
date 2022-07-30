@@ -1,0 +1,19 @@
+## sudoers file.
+
+# Enable logging of a command's output.
+# Use sudoreplay to play back logged sessions.
+Defaults shell_noargs
+
+# Allow root to execute any command
+root ALL=(ALL) ALL
+
+# Allow members of group administrators to execute any command
+%administrators ALL=(ALL) NOPASSWD: ALL
+
+# Configure privilege of wheel group
+Cmnd_Alias SHELL = /bin/ash, /bin/sh, /bin/bash
+Cmnd_Alias SU = /usr/bin/su
+%wheel ALL=(ALL) NOPASSWD: ALL, !SHELL, !SU
+
+# Include user-defined sudoers
+#includedir /etc/sudoers.d

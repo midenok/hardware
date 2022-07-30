@@ -30,6 +30,11 @@ alias ll="ls -la"
 ulimit -c 0
 PATH=/opt/bin:/opt/sbin:$PATH
 
+if [ $(id -u) -eq 0 ]; then
+	mdadm -D /dev/md0
+	free -h
+fi
+
 if [ -f /etc.defaults/.bashrc_profile ]; then
     source /etc.defaults/.bashrc_profile
 fi
