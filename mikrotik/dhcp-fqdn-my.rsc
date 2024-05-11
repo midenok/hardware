@@ -21,7 +21,7 @@ add name="dhcp-startup" source={
         :return $string
     }
 
-    # Update static DNS single entry for (hostname $1, IP $2)
+    # Update static DNS single entry for ($1=hostname, $2=IP)
     :global dnssethost do={
         :global chopzero
         :global dnsLocalSuffix
@@ -29,7 +29,12 @@ add name="dhcp-startup" source={
         :if ([:len $hostname] > 0) do={
             :set hostname ($hostname. $dnsLocalSuffix)
             :local ip $2
-            :local leasetime [/ip dhcp-server get [find name=default] lease-time]
+			/ip dhcp-server
+			:local dhcpserv [find disabled=no invalid=no]
+			:if ([:len $dhcpserv] = 0) do={
+				:error "Cannot find working DHCP server (check /ip dhcp-server print where disabled=no invalid=no)"
+			}
+            :local leasetime [get ($dhcpserv->0) lease-time]
             /ip dns static
             :local items ([find address=$ip], [find name=$hostname address!=$ip])
             :if ([:len $items] > 0) do={
