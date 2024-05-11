@@ -1,5 +1,5 @@
 # Installation:
-# 1. Modify settings
+# 1. Modify settings (global variables in the beginning of dhcp-startup)
 # 2. Cut&paste contents of this file to console
 #    or:
 # 2. Save modified file, upload via tftp, sftp, web, etc.
@@ -11,6 +11,7 @@ remove [find name="dhcp-startup"]
 add name="dhcp-startup" source={
     :global dnsLocalSuffix ".lan"
 
+    # Chop \00 from string
     :global chopzero do={
         :local string $1
         :local end [:find $string "\00"]
@@ -20,6 +21,7 @@ add name="dhcp-startup" source={
         :return $string
     }
 
+    # Update static DNS single entry for (hostname $1, IP $2)
     :global dnssethost do={
         :global chopzero
         :global dnsLocalSuffix
@@ -50,7 +52,10 @@ add name="dhcp-startup" source={
     /ip address
     :local localip [get [:pick [find interface=$iface disabled=no] 0] address]
     :set localip [:pick $localip 0 [:find $localip "/"]]
-    $dnssethost [/system identity get name] $localip
+    :local name [$chopzero [/system identity get name]]
+    :put "Updating entry for this router: $localip $name"
+    $dnssethost $name $localip
+    :put "Updating other entries:"
     /system script run dhcp-names-refresh
 }
 
@@ -82,6 +87,7 @@ add name="dhcp-names-refresh" source={
         :local ip [get $i address]
 
         :if ([:len $hostname] > 0) do={
+            :put $ip $hostname
             $dnssethost $hostname $ip
         }
     }
