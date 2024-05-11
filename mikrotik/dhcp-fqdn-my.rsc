@@ -87,7 +87,7 @@ add name="dhcp-names-refresh" source={
         :local ip [get $i address]
 
         :if ([:len $hostname] > 0) do={
-            :put $ip $hostname
+            :put "$ip $hostname"
             $dnssethost $hostname $ip
         }
     }
